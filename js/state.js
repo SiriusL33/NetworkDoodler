@@ -55,16 +55,17 @@ const State = (() => {
   function emit() { dirty = true; Bus.emit('state', project); }
 
   function blank(name = 'Unbenanntes Projekt') {
-    project = { meta: { name, mode: 'design', created: new Date().toISOString() }, devices: [], cables: [] };
+    project = { meta: { name, mode: 'design', created: new Date().toISOString() }, devices: [], cables: [], groups: [] };
     dirty = false; Bus.emit('state', project); return project;
   }
   function loadFrom(json) {
     if (!json || !Array.isArray(json.devices) || !Array.isArray(json.cables)) throw new Error('Ungültige Projektdatei.');
     project = {
       meta: Object.assign({ name: 'Import', mode: 'design', created: new Date().toISOString() }, json.meta || {}),
-      devices: json.devices, cables: json.cables,
+      devices: json.devices, cables: json.cables, groups: json.groups || [],
     };
-    project.devices.forEach((d) => { d.rotation ||= 0; });
+    project.devices.forEach((d) => { d.rotation ||= 0; d.group = d.group || null; });
+    project.cables.forEach((c) => { c.waypoints = c.waypoints || []; c.group = c.group || null; });
     dirty = false; Bus.emit('state', project); return project;
   }
 
@@ -91,7 +92,7 @@ const State = (() => {
     if (!asset) return null;
     const d = {
       id: uid('dev'), assetId, model: asset.model, icon: asset.icon, category: asset.category,
-      x, y, rotation: 0, color: null,
+      x, y, rotation: 0, color: null, group: null,
       poeBudget: asset.poeBudget || 0, poeDraw: asset.poeDraw || 0, power: asset.power || 0,
       props: { hostname: '', ip4: '', ip6: '', mac: '', ssid: '', password: '', note: '' },
       ports: expandPorts(asset),
@@ -116,12 +117,13 @@ const State = (() => {
   function updateDeviceProps(id, props) { const d = device(id); if (d) { Object.assign(d.props, props); emit(); } }
 
   /* --------------------------------------------------------- Kabel */
-  function addCable(from, to) {
+  function addCable(from, to, waypoints = []) {
     const std = cableStandard(activeCable.standard);
     const cable = {
       id: uid('cbl'),
       standard: activeCable.standard, medium: std.medium,
       color: activeCable.color, length: activeCable.length, label: activeCable.label || '',
+      waypoints: waypoints.map((p) => ({ x: p.x, y: p.y })), group: null,
       from: { deviceId: from.deviceId, portId: from.portId },
       to: { deviceId: to.deviceId, portId: to.portId },
     };
@@ -130,6 +132,39 @@ const State = (() => {
     project.cables.push(cable); emit(); return cable;
   }
   function removeCable(id) { project.cables = project.cables.filter((c) => c.id !== id); emit(); }
+  function updateCable(id, patch) {
+    const c = project.cables.find((x) => x.id === id); if (!c) return;
+    Object.assign(c, patch);
+    if (patch.standard) c.medium = cableStandard(patch.standard).medium;
+    c.speed = effectiveSpeed(c); c.status = evaluateCable(c); emit();
+  }
+  function cable(id) { return project.cables.find((c) => c.id === id); }
+
+  /* --------------------------------------------------------- Gruppen */
+  function createGroup(memberIds, name, color) {
+    const g = { id: uid('grp'), name: name || ('Gruppe ' + (project.groups.length + 1)), color: color || '#6366f1' };
+    project.groups.push(g);
+    assignToGroup(memberIds, g.id); emit(); return g;
+  }
+  function assignToGroup(memberIds, groupId) {
+    memberIds.forEach((id) => {
+      const d = device(id); if (d) { d.group = groupId; return; }
+      const c = cable(id); if (c) c.group = groupId;
+    });
+    emit();
+  }
+  function removeFromGroup(memberIds) { assignToGroup(memberIds, null); }
+  function updateGroup(id, patch) { const g = project.groups.find((x) => x.id === id); if (g) { Object.assign(g, patch); emit(); } }
+  function dissolveGroup(id) {
+    project.devices.forEach((d) => { if (d.group === id) d.group = null; });
+    project.cables.forEach((c) => { if (c.group === id) c.group = null; });
+    project.groups = project.groups.filter((g) => g.id !== id); emit();
+  }
+  function group(id) { return project.groups.find((g) => g.id === id); }
+  function groupMembers(id) {
+    return [...project.devices.filter((d) => d.group === id).map((d) => d.id),
+            ...project.cables.filter((c) => c.group === id).map((c) => c.id)];
+  }
 
   /* ------------------------------------------------- Debug-Engine */
   function acceptsMedium(port, medium) {
@@ -213,8 +248,10 @@ const State = (() => {
     setActiveCable(patch) { Object.assign(activeCable, patch); Bus.emit('activecable', activeCable); },
 
     addDevice, duplicateDevice, rotateDevice, setDeviceColor, moveDevice, removeDevice, updateDeviceProps,
-    addCable, removeCable,
+    addCable, removeCable, updateCable, cable,
     device, portOf, isPortUsed, isPortDisabled,
     evaluateCable, cableReason, recomputeAll, poeLoad,
+    get groups() { return project ? project.groups : []; },
+    createGroup, assignToGroup, removeFromGroup, updateGroup, dissolveGroup, group, groupMembers,
   };
 })();

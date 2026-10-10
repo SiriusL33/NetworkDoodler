@@ -1,7 +1,20 @@
-# Network Schematic Designer (NSD) · v2.0
+# Network Schematic Designer (NSD) · v2.1
 
 Lokaler, JSON-state-basierter **CAD-Netzwerk-Schaltplan-Editor** im Stil von
 PCB-Design-Software (EasyEDA). Vanilla JS · HTML5 · Tailwind · ohne Backend.
+
+## Neu in v2.1
+
+- **Werkzeug-Toolbar (Fusion-Stil):** Werkzeuge · Kabel & Flags · Bearbeiten ·
+  Ansicht · Projekt – von links nach rechts, mit aussagekräftigen Icons.
+- **Präzises Kabel-Routing mit Zwischenstops:** Werkzeug „Kabel" → Quell-Port
+  klicken → leere Fläche klicken setzt orthogonale Wegpunkte → Ziel-Port.
+  `Backspace`/`Esc` möglich; Auto-Routing nur, wenn keine Wegpunkte gesetzt sind.
+- **Gruppen & Highlight-Modus:** Geräte und Kabel gruppieren und einzeln
+  hervorheben – der Rest wird abgeblendet. Ideal bei komplexen, sich
+  überschneidenden Netzen. (Tab „Gruppen" rechts.)
+- **Canvas-Skalierung gefixt** (kein seitliches Abschneiden mehr), plus
+  „Einpassen"-Button.
 
 ## Starten
 
@@ -16,14 +29,16 @@ python3 -m http.server 8000      # dann http://localhost:8000
 | Aktion | Bedienung |
 |--------|-----------|
 | Gerät platzieren | Asset aus der Palette aufs Canvas **ziehen** |
-| Verkabeln | **Port klicken → Ziel-Port klicken** (nutzt das aktive Base-Kabel) |
-| Kabel wählen | **„Kabel"-Menü** in der Top-Leiste (Standard/Farbe/Länge/Flag) |
+| Verkabeln (präzise) | Werkzeug **„Kabel"** → Quell-Port → leere Fläche = Wegpunkt(e) → Ziel-Port |
+| Kabel wählen | **Kabel-Button** in der Toolbar (Standard/Farbe/Länge/Flag) |
+| Mehrfachauswahl | **Shift-Klick** auf Geräte/Kabel, oder Werkzeug „Gruppieren" |
+| Gruppieren/Highlight | Auswahl → Tab **„Gruppen"** → Gruppe erstellen → Highlight |
 | Verschieben | Gerät ziehen (rastet am Grid) |
 | Quick-Menü | **Gerät anklicken** → Löschen / Duplizieren / Rotieren / Farbe |
 | Pan | Leere Fläche ziehen **oder** mittlere Maustaste |
-| Zoom | **Mausrad** (stufenlos, zentriert auf den Zeiger) |
-| Eigenschaften | Gerät auswählen → rechte Sidebar (IP/MAC-Masken) |
-| Löschen | `Entf` bei ausgewähltem Gerät |
+| Zoom / Einpassen | **Mausrad** · Toolbar-Button **„Einpassen"** |
+| Eigenschaften | Gerät/Kabel auswählen → rechte Sidebar |
+| Löschen | `Entf` bei Auswahl |
 
 ## Was ist neu in v2.0 (Update-Manifest)
 

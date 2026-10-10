@@ -1,13 +1,14 @@
 /* =========================================================================
-   canvas.js – Interaktives CAD-Canvas (v2)
+   canvas.js – Interaktives CAD-Canvas (v3)
    -------------------------------------------------------------------------
-   - Unendliche Arbeitsfläche mit Pan (Leerklick+ziehen / mittlere Maus) und
-     stufenlosem Zoom am Mauszeiger (viewBox-basiert).
-   - Orthogonales Grid-Routing der Kabel (nur 90°-Winkel).
-   - Eckige Ports mit gelbem Snap-Punkt in der Mitte; Status-LEDs in den
-     oberen Ecken (werden vom Kabel nicht verdeckt).
-   - Geräte: verschieben, rotieren (90°), Kontextmenü (Quick Actions).
-   - Debug-Engine-LEDs & Bottleneck-Badges.
+   - Kamera-Modell (cam.x/y/zoom): viewBox = Elementgröße / zoom  → nie
+     verzerrt oder abgeschnitten, Aspect immer korrekt.
+   - Werkzeuge (tool): 'select' | 'wire' | 'group'.
+   - Präzise Wegpunkt-Verkabelung: Port → Klicks setzen orthogonale
+     Zwischenstops → Ziel-Port. Backspace entfernt letzten, Esc bricht ab.
+   - Mehrfachauswahl (Shift-Klick), Gruppen + Highlight (dimmt den Rest).
+   - Eckige Ports (Snap-Punkt, Eck-LEDs), Rotieren/Duplizieren/Farbe,
+     PoE-Badge & Debug-LEDs.
    ========================================================================= */
 
 const Canvas = (() => {
@@ -15,10 +16,12 @@ const Canvas = (() => {
   const GRID = 20, BOX_H = 64, BOX_W_MIN = 116, PORT_PITCH = 24, PS = 16, STUB = 24;
 
   let svg, wrap, gGrid, gGrid2, gCables, gDevices, gOverlay, ctxMenu;
-  let view = { x: 0, y: 0, w: 1200, h: 800 };
-  let selectedId = null;
-  let wiring = null;    // { deviceId, portId }
-  let ghost = null, snapTarget = null;
+  let cam = { x: -40, y: -40, zoom: 1 };   // zoom = Bildschirm-Pixel pro Welt-Einheit
+  let tool = 'select';
+  let selectedIds = new Set();
+  let wiring = null;                        // { deviceId, portId, waypoints:[] }
+  let ghost = null;
+  let highlightGroupId = null;
 
   const e = (tag, attrs = {}) => { const n = document.createElementNS(SVGNS, tag); for (const k in attrs) n.setAttribute(k, attrs[k]); return n; };
   const snap = (v) => Math.round(v / GRID) * GRID;
@@ -26,87 +29,71 @@ const Canvas = (() => {
 
   /* --------------------------------------------------------------- Init */
   function init(svgEl, wrapEl) {
-    svg = svgEl; wrap = wrapEl;
-    svg.innerHTML = '';
-    // Grid-Pattern
+    svg = svgEl; wrap = wrapEl; svg.innerHTML = '';
     const defs = e('defs');
     defs.innerHTML =
-      `<pattern id="nd-grid" width="${GRID}" height="${GRID}" patternUnits="userSpaceOnUse">
-         <path d="M ${GRID} 0 L 0 0 0 ${GRID}" fill="none" stroke="var(--nd-grid)" stroke-width="1"/>
-       </pattern>
-       <pattern id="nd-grid-strong" width="${GRID * 5}" height="${GRID * 5}" patternUnits="userSpaceOnUse">
-         <path d="M ${GRID * 5} 0 L 0 0 0 ${GRID * 5}" fill="none" stroke="var(--nd-grid-strong)" stroke-width="1"/>
-       </pattern>`;
+      `<pattern id="nd-grid" width="${GRID}" height="${GRID}" patternUnits="userSpaceOnUse"><path d="M ${GRID} 0 L 0 0 0 ${GRID}" fill="none"/></pattern>
+       <pattern id="nd-grid-strong" width="${GRID * 5}" height="${GRID * 5}" patternUnits="userSpaceOnUse"><path d="M ${GRID * 5} 0 L 0 0 0 ${GRID * 5}" fill="none"/></pattern>`;
     svg.appendChild(defs);
     gGrid = e('rect', { fill: 'url(#nd-grid)' });
     gGrid2 = e('rect', { fill: 'url(#nd-grid-strong)' }); gGrid2.id = 'nd-grid2';
     gCables = e('g'); gDevices = e('g'); gOverlay = e('g');
     svg.append(gGrid, gGrid2, gCables, gDevices, gOverlay);
 
-    // Kontextmenü-Overlay (HTML) im Wrapper.
-    ctxMenu = document.createElement('div');
-    ctxMenu.className = 'nd-ctxmenu hidden';
-    wrap.appendChild(ctxMenu);
+    ctxMenu = document.createElement('div'); ctxMenu.className = 'nd-ctxmenu hidden'; wrap.appendChild(ctxMenu);
 
-    // Anfangs-View an Wrapper-Größe koppeln (1:1-Zoom).
-    view = { x: -40, y: -40, w: wrap.clientWidth || 1200, h: wrap.clientHeight || 800 };
-    applyView();
+    cam = { x: -40, y: -40, zoom: 1 }; applyView();
 
     svg.addEventListener('dragover', (ev) => { ev.preventDefault(); ev.dataTransfer.dropEffect = 'copy'; });
     svg.addEventListener('drop', onDrop);
     svg.addEventListener('mousedown', onCanvasDown);
     svg.addEventListener('mousemove', onWireMove);
     svg.addEventListener('wheel', onWheel, { passive: false });
-    window.addEventListener('resize', () => { view.w = wrap.clientWidth; view.h = wrap.clientHeight; applyView(); });
-
+    svg.addEventListener('contextmenu', (ev) => { ev.preventDefault(); if (wiring) cancelWiring(); });
+    window.addEventListener('resize', applyView);
     Bus.on('state', render);
   }
 
   function applyView() {
-    svg.setAttribute('viewBox', `${view.x} ${view.y} ${view.w} ${view.h}`);
-    [gGrid, gGrid2].forEach((g) => {
-      if (!g) return;
-      g.setAttribute('x', view.x); g.setAttribute('y', view.y);
-      g.setAttribute('width', view.w); g.setAttribute('height', view.h);
-    });
+    const W = wrap.clientWidth || 1200, H = wrap.clientHeight || 800;
+    const vbW = W / cam.zoom, vbH = H / cam.zoom;
+    svg.setAttribute('viewBox', `${cam.x} ${cam.y} ${vbW} ${vbH}`);
+    [gGrid, gGrid2].forEach((g) => { g.setAttribute('x', cam.x); g.setAttribute('y', cam.y); g.setAttribute('width', vbW); g.setAttribute('height', vbH); });
     hideCtxMenu();
   }
-
   function toWorld(cx, cy) { const p = svg.createSVGPoint(); p.x = cx; p.y = cy; return p.matrixTransform(svg.getScreenCTM().inverse()); }
+  function worldToClient(x, y) { const m = svg.getScreenCTM(); return { x: m.a * x + m.c * y + m.e, y: m.b * x + m.d * y + m.f }; }
 
   /* ------------------------------------------------------------ Pan/Zoom */
   function onWheel(ev) {
     ev.preventDefault();
-    const factor = ev.deltaY < 0 ? 0.88 : 1.14;
-    const wpt = toWorld(ev.clientX, ev.clientY);
-    const nw = Math.min(8000, Math.max(160, view.w * factor));
-    const nh = nw * (view.h / view.w);
-    // Zoom auf den Mauszeiger fixieren.
-    view.x = wpt.x - (wpt.x - view.x) * (nw / view.w);
-    view.y = wpt.y - (wpt.y - view.y) * (nh / view.h);
-    view.w = nw; view.h = nh;
-    applyView();
+    const w = toWorld(ev.clientX, ev.clientY);
+    const nz = Math.min(6, Math.max(0.15, cam.zoom * (ev.deltaY < 0 ? 1.14 : 0.88)));
+    cam.x = w.x - (w.x - cam.x) * (cam.zoom / nz);
+    cam.y = w.y - (w.y - cam.y) * (cam.zoom / nz);
+    cam.zoom = nz; applyView();
+  }
+  function startPan(ev) {
+    const sc = { x: ev.clientX, y: ev.clientY }, so = { x: cam.x, y: cam.y }; let moved = false;
+    const move = (e2) => { cam.x = so.x - (e2.clientX - sc.x) / cam.zoom; cam.y = so.y - (e2.clientY - sc.y) / cam.zoom; if (Math.abs(e2.clientX - sc.x) + Math.abs(e2.clientY - sc.y) > 3) moved = true; applyView(); };
+    const up = () => { document.removeEventListener('mousemove', move); document.removeEventListener('mouseup', up); return moved; };
+    return { move, up, get moved() { return moved; } };
   }
 
   function onCanvasDown(ev) {
     const onEmpty = ev.target === svg || ev.target === gGrid || ev.target.id === 'nd-grid2';
-    // Pan mit mittlerer Maustaste (überall) oder Linksklick auf leere Fläche.
-    if (ev.button === 1 || (ev.button === 0 && onEmpty)) {
-      const startClient = { x: ev.clientX, y: ev.clientY };
-      const startView = { x: view.x, y: view.y };
-      const scale = view.w / (wrap.clientWidth || view.w);
-      let moved = false;
-      const move = (e2) => {
-        const dx = (e2.clientX - startClient.x) * scale, dy = (e2.clientY - startClient.y) * scale;
-        if (Math.abs(dx) + Math.abs(dy) > 3) moved = true;
-        view.x = startView.x - dx; view.y = startView.y - dy; applyView();
-      };
-      const up = () => {
-        document.removeEventListener('mousemove', move); document.removeEventListener('mouseup', up);
-        if (!moved && ev.button === 0) { select(null); cancelWiring(); hideCtxMenu(); }
-      };
-      document.addEventListener('mousemove', move); document.addEventListener('mouseup', up);
-    }
+    if (ev.button === 1) { const p = startPan(ev); document.addEventListener('mousemove', p.move); document.addEventListener('mouseup', p.up); return; }
+    if (ev.button !== 0 || !onEmpty) return;
+
+    // Linksklick auf leere Fläche
+    const p = startPan(ev);
+    document.addEventListener('mousemove', p.move);
+    document.addEventListener('mouseup', () => {
+      p.up();
+      if (p.moved) return;                    // war ein Pan
+      if (wiring) { addWaypointAt(ev.clientX, ev.clientY); return; }   // Zwischenstop setzen
+      setSelection([]); hideCtxMenu();
+    }, { once: true });
   }
 
   function onDrop(ev) {
@@ -114,26 +101,50 @@ const Canvas = (() => {
     const assetId = ev.dataTransfer.getData('text/asset'); if (!assetId) return;
     const p = toWorld(ev.clientX, ev.clientY);
     const dev = State.addDevice(assetId, snap(p.x - 55), snap(p.y - 30));
-    if (dev) select(dev.id);
+    if (dev) setSelection([dev.id]);
   }
 
   /* -------------------------------------------------------- Geometrie */
   function boxWidth(d) { return Math.max(BOX_W_MIN, d.ports.length * PORT_PITCH + 20); }
-  function portLocal(d, i) {
-    const W = boxWidth(d), n = d.ports.length;
-    const startX = (W - (n - 1) * PORT_PITCH) / 2;
-    return { x: startX + i * PORT_PITCH - W / 2, y: BOX_H / 2, W };
-  }
-  // Welt-Anker + Normale eines Ports (berücksichtigt Rotation).
+  function portLocal(d, i) { const W = boxWidth(d), n = d.ports.length, s = (W - (n - 1) * PORT_PITCH) / 2; return { x: s + i * PORT_PITCH - W / 2, y: BOX_H / 2, W }; }
   function portWorld(deviceId, portId) {
     const d = State.device(deviceId); if (!d) return null;
     const i = d.ports.findIndex((p) => p.id === portId); if (i < 0) return null;
-    const loc = portLocal(d, i);
-    const cx = d.x + loc.W / 2, cy = d.y + BOX_H / 2, r = d.rotation || 0;
+    const loc = portLocal(d, i), cx = d.x + loc.W / 2, cy = d.y + BOX_H / 2, r = d.rotation || 0;
     const rv = rot(loc.x, loc.y, r), nv = rot(0, 1, r);
-    return { x: snap0(cx + rv.x), y: snap0(cy + rv.y), nx: Math.round(nv.x), ny: Math.round(nv.y), raw: { x: cx + rv.x, y: cy + rv.y } };
+    return { x: Math.round(cx + rv.x), y: Math.round(cy + rv.y), nx: Math.round(nv.x), ny: Math.round(nv.y) };
   }
-  function snap0(v) { return Math.round(v); }
+
+  /* --------------------------------------------- Orthogonale Pfade */
+  function align(p, ref) { return Math.abs(p.x - ref.x) >= Math.abs(p.y - ref.y) ? { x: p.x, y: ref.y } : { x: ref.x, y: p.y }; }
+  function dedupe(pts) { return pts.filter((p, i) => i === 0 || p.x !== pts[i - 1].x || p.y !== pts[i - 1].y); }
+  function orthogonalize(pts) {
+    pts = dedupe(pts); if (pts.length < 2) return pts;
+    const out = [pts[0]];
+    for (let i = 1; i < pts.length; i++) {
+      const a = out[out.length - 1], b = pts[i];
+      if (a.x !== b.x && a.y !== b.y) out.push({ x: b.x, y: a.y }); // Ellbogen einfügen
+      out.push(b);
+    }
+    return dedupe(out);
+  }
+  function pointsToPath(pts) { return pts.map((p, i) => `${i ? 'L' : 'M'} ${p.x} ${p.y}`).join(' '); }
+  // Automatischer Z-Kanal (wenn keine Wegpunkte gesetzt sind)
+  function autoRoute(A, B) {
+    const a1 = { x: snap(A.x + A.nx * STUB), y: snap(A.y + A.ny * STUB) };
+    const b1 = { x: snap(B.x + B.nx * STUB), y: snap(B.y + B.ny * STUB) };
+    const mids = A.nx === 0 ? [{ x: a1.x, y: snap((a1.y + b1.y) / 2) }, { x: b1.x, y: snap((a1.y + b1.y) / 2) }]
+                            : [{ x: snap((a1.x + b1.x) / 2), y: a1.y }, { x: snap((a1.x + b1.x) / 2), y: b1.y }];
+    return dedupe([A, a1, ...mids, b1, B]);
+  }
+  function cableRoute(c) {
+    const A = portWorld(c.from.deviceId, c.from.portId), B = portWorld(c.to.deviceId, c.to.portId);
+    if (!A || !B) return null;
+    if (!c.waypoints || !c.waypoints.length) return autoRoute(A, B);
+    const stubA = { x: snap(A.x + A.nx * STUB), y: snap(A.y + A.ny * STUB) };
+    const stubB = { x: snap(B.x + B.nx * STUB), y: snap(B.y + B.ny * STUB) };
+    return orthogonalize([{ x: A.x, y: A.y }, stubA, ...c.waypoints, stubB, { x: B.x, y: B.y }]);
+  }
 
   /* --------------------------------------------------------- Render */
   function render() {
@@ -142,306 +153,265 @@ const Canvas = (() => {
     renderCables(); renderDevices();
   }
 
+  function dimmed(item) { return highlightGroupId && item.group !== highlightGroupId; }
+
+  function renderCables() {
+    gCables.innerHTML = '';
+    State.project.cables.forEach((c) => {
+      const pts = cableRoute(c); if (!pts) return;
+      const d = pointsToPath(pts);
+      const grp = c.group ? State.group(c.group) : null;
+      const g = e('g', { class: 'nd-cable-g' + (dimmed(c) ? ' nd-dim' : '') + (selectedIds.has(c.id) ? ' selected' : '') });
+      g.appendChild(e('path', { class: 'nd-cable-hit', d }));
+      if (grp && highlightGroupId === c.group) g.appendChild(e('path', { class: 'nd-cable-halo', d, stroke: grp.color }));
+      g.appendChild(e('path', { class: `nd-cable status-${c.status}`, d, stroke: c.status === 'error' ? '#ef4444' : c.color }));
+      const mid = pts[Math.floor(pts.length / 2)], std = cableStandard(c.standard);
+      const lbl = e('text', { class: 'nd-cable-label', x: mid.x, y: mid.y - 5, 'text-anchor': 'middle' });
+      lbl.textContent = `${std.name} · ${c.length} m · ${speedLabel(c.speed)}${c.label ? ' · ' + c.label : ''}`;
+      g.appendChild(lbl);
+      g.querySelector('.nd-cable-hit').addEventListener('click', (ev) => { ev.stopPropagation(); clickItem(c.id, ev.shiftKey); });
+      gCables.appendChild(g);
+    });
+  }
+
   function renderDevices() {
     gDevices.innerHTML = '';
     const mode = State.project.meta.mode;
     State.project.devices.forEach((d) => {
       const W = boxWidth(d), cx = d.x + W / 2, cy = d.y + BOX_H / 2, r = d.rotation || 0;
-      const g = e('g', { class: 'nd-device' + (d.id === selectedId ? ' selected' : '') }); g.dataset.id = d.id;
+      const grp = d.group ? State.group(d.group) : null;
+      const g = e('g', { class: 'nd-device' + (selectedIds.has(d.id) ? ' selected' : '') + (dimmed(d) ? ' nd-dim' : '') + (grp && highlightGroupId === d.group ? ' nd-hl' : '') });
+      g.dataset.id = d.id;
 
       const inner = e('g', { transform: `translate(${cx} ${cy}) rotate(${r})` });
-      // Box (enthält nur Piktogramm + Ports)
       const box = e('rect', { class: 'nd-device-body', x: -W / 2, y: -BOX_H / 2, width: W, height: BOX_H, rx: 8 });
-      if (d.color) { box.setAttribute('stroke', d.color); box.setAttribute('stroke-width', '2.5'); }
+      if (grp && highlightGroupId === d.group) { box.setAttribute('stroke', grp.color); box.setAttribute('stroke-width', '3'); }
+      else if (d.color) { box.setAttribute('stroke', d.color); box.setAttribute('stroke-width', '2.5'); }
       inner.appendChild(box);
-      // Piktogramm
-      const sym = e('g', { transform: `translate(0 ${-8})`, class: 'text-slate-500 dark:text-slate-300', color: 'currentColor' });
-      sym.innerHTML = Symbols.render(d.icon, mode);
-      inner.appendChild(sym);
-      // Ports
+      const sym = e('g', { transform: 'translate(0 -8)', class: 'text-slate-500 dark:text-slate-300', color: 'currentColor' }); sym.innerHTML = Symbols.render(d.icon, mode); inner.appendChild(sym);
       d.ports.forEach((p, i) => inner.appendChild(renderPort(d, p, i)));
       g.appendChild(inner);
 
-      // Label IMMER außerhalb & oberhalb der Box (unrotiert, lesbar).
-      const halfY = (r % 180 === 0) ? BOX_H / 2 : W / 2;
-      const topY = cy - halfY - 8;
-      const label = e('text', { class: 'nd-device-label', x: cx, y: topY, 'text-anchor': 'middle' });
-      label.textContent = d.props.hostname || d.model;
-      g.appendChild(label);
+      const halfY = (r % 180 === 0) ? BOX_H / 2 : W / 2, topY = cy - halfY - 8;
+      const label = e('text', { class: 'nd-device-label', x: cx, y: topY, 'text-anchor': 'middle' }); label.textContent = d.props.hostname || d.model; g.appendChild(label);
+      if (grp) { const dot = e('circle', { cx: cx - textW(label.textContent) / 2 - 7, cy: topY - 3, r: 3, fill: grp.color }); g.appendChild(dot); }
       if (d.props.ip4) { const s = e('text', { class: 'nd-device-sub', x: cx, y: topY + 11, 'text-anchor': 'middle' }); s.textContent = d.props.ip4; g.appendChild(s); }
 
-      // PoE-Budget-Badge (Switch)
       const poe = State.poeLoad(d.id);
-      if (poe) {
-        const bY = cy + halfY + 12;
-        const badge = e('text', { class: 'nd-poe-badge ' + (poe.over ? 'over' : 'ok'), x: cx, y: bY, 'text-anchor': 'middle' });
-        badge.textContent = `PoE ${poe.load}/${poe.budget} W${poe.over ? '  ⚠' : ''}`;
-        g.appendChild(badge);
-      }
+      if (poe) { const b = e('text', { class: 'nd-poe-badge ' + (poe.over ? 'over' : 'ok'), x: cx, y: cy + halfY + 12, 'text-anchor': 'middle' }); b.textContent = `PoE ${poe.load}/${poe.budget} W${poe.over ? '  ⚠' : ''}`; g.appendChild(b); }
 
       enableDeviceInteract(g, d);
       gDevices.appendChild(g);
     });
   }
+  function textW(s) { return (s || '').length * 6.5; }
 
   function renderPort(d, port, i) {
-    const loc = portLocal(d, i);
-    const lx = loc.x, ly = loc.y;
-    const used = State.isPortUsed(d.id, port.id);
-    const disabled = State.isPortDisabled(d.id, port.id);
-    const status = portStatus(d.id, port.id);
+    const loc = portLocal(d, i), lx = loc.x, ly = loc.y;
+    const used = State.isPortUsed(d.id, port.id), disabled = State.isPortDisabled(d.id, port.id), status = portStatus(d.id, port.id);
     const armed = wiring && wiring.deviceId === d.id && wiring.portId === port.id;
     const compatible = wiring && !armed && !used && !disabled;
-
     const g = e('g', { class: 'nd-port' + (armed ? ' armed' : '') + (compatible ? ' compatible' : '') + (disabled ? ' disabled' : '') });
     g.dataset.dev = d.id; g.dataset.port = port.id;
-
-    // Eckiger Port
     g.appendChild(e('rect', { class: 'nd-port-body', x: lx - PS / 2, y: ly - PS / 2, width: PS, height: PS, rx: 2 }));
-    // Status-LEDs in den OBEREN Ecken (nicht vom Kabel verdeckt)
     g.appendChild(e('rect', { class: `nd-led nd-led-green ${status}`, x: lx - PS / 2 + 1.5, y: ly - PS / 2 + 1.5, width: 3, height: 3, rx: 0.5 }));
     g.appendChild(e('rect', { class: `nd-led nd-led-amber ${status}`, x: lx + PS / 2 - 4.5, y: ly - PS / 2 + 1.5, width: 3, height: 3, rx: 0.5 }));
-    // Gelber Snapping-Punkt in der Mitte
     g.appendChild(e('circle', { class: 'nd-snap-dot', cx: lx, cy: ly, r: 2.4 }));
-    // Port-Kürzel (oberhalb, innerhalb der Box)
     const t = e('text', { class: 'nd-port-label', x: lx, y: ly - PS / 2 - 2 }); t.textContent = port.label; g.appendChild(t);
-
     if (status === 'warning') {
       const badge = e('g', { class: 'nd-warn-badge', transform: `translate(${lx + PS / 2}, ${ly - PS / 2})` });
-      badge.appendChild(e('circle', { r: 4.5 }));
-      const bt = e('text', { y: 3 }); bt.textContent = '!'; badge.appendChild(bt);
+      badge.appendChild(e('circle', { r: 4.5 })); const bt = e('text', { y: 3 }); bt.textContent = '!'; badge.appendChild(bt);
       badge.addEventListener('click', (ev) => { ev.stopPropagation(); showPortReason(d.id, port.id); });
       g.appendChild(badge);
     }
-
-    // Größere Hitbox
-    const hit = e('rect', { class: 'nd-port-hit', x: lx - PS / 2 - 4, y: ly - PS / 2 - 4, width: PS + 8, height: PS + 8 });
-    g.appendChild(hit);
+    g.appendChild(e('rect', { class: 'nd-port-hit', x: lx - PS / 2 - 4, y: ly - PS / 2 - 4, width: PS + 8, height: PS + 8 }));
     g.addEventListener('mousedown', (ev) => ev.stopPropagation());
-    g.addEventListener('click', (ev) => { ev.stopPropagation(); if (!disabled) onPortClick(d.id, port.id); });
+    g.addEventListener('click', (ev) => { ev.stopPropagation(); onPortClick(d.id, port.id, ev.shiftKey); });
     return g;
   }
 
   function portStatus(deviceId, portId) {
-    const cs = State.project.cables.filter((c) =>
-      (c.from.deviceId === deviceId && c.from.portId === portId) ||
-      (c.to.deviceId === deviceId && c.to.portId === portId));
+    const cs = State.project.cables.filter((c) => (c.from.deviceId === deviceId && c.from.portId === portId) || (c.to.deviceId === deviceId && c.to.portId === portId));
     if (!cs.length) return 'idle';
     if (cs.some((c) => c.status === 'error')) return 'error';
     if (cs.some((c) => c.status === 'warning')) return 'warning';
     return 'ok';
   }
   function showPortReason(deviceId, portId) {
-    const c = State.project.cables.find((x) =>
-      (x.from.deviceId === deviceId && x.from.portId === portId) ||
-      (x.to.deviceId === deviceId && x.to.portId === portId));
+    const c = State.project.cables.find((x) => (x.from.deviceId === deviceId && x.from.portId === portId) || (x.to.deviceId === deviceId && x.to.portId === portId));
     if (c) UI.toast(State.cableReason(c), 'warn');
-  }
-
-  /* ------------------------------------------------- Orthogonales Routing */
-  // Liefert Punkt-Array (Welt) fuer eine orthogonale Verbindung A->B.
-  function orthRoute(A, B) {
-    const a1 = { x: snap(A.x + A.nx * STUB), y: snap(A.y + A.ny * STUB) };
-    const b1 = { x: snap(B.x + B.nx * STUB), y: snap(B.y + B.ny * STUB) };
-    let mids;
-    if (A.nx === 0) { // Quelle vertikal orientiert -> horizontaler Kanal
-      const midY = snap((a1.y + b1.y) / 2);
-      mids = [{ x: a1.x, y: midY }, { x: b1.x, y: midY }];
-    } else {          // horizontal orientiert -> vertikaler Kanal
-      const midX = snap((a1.x + b1.x) / 2);
-      mids = [{ x: midX, y: a1.y }, { x: midX, y: b1.y }];
-    }
-    const pts = [A, a1, ...mids, b1, B];
-    // aufeinanderfolgende Duplikate entfernen
-    return pts.filter((p, i) => i === 0 || p.x !== pts[i - 1].x || p.y !== pts[i - 1].y);
-  }
-  function pointsToPath(pts) { return pts.map((p, i) => `${i ? 'L' : 'M'} ${p.x} ${p.y}`).join(' '); }
-
-  function renderCables() {
-    gCables.innerHTML = '';
-    State.project.cables.forEach((c) => {
-      const A = portWorld(c.from.deviceId, c.from.portId);
-      const B = portWorld(c.to.deviceId, c.to.portId);
-      if (!A || !B) return;
-      const pts = orthRoute(A, B);
-      const d = pointsToPath(pts);
-      const g = e('g');
-      g.appendChild(e('path', { class: 'nd-cable-hit', d }));
-      g.appendChild(e('path', { class: `nd-cable status-${c.status}`, d, stroke: c.status === 'error' ? '#ef4444' : c.color }));
-      // Label am längsten Segment / Mittelpunkt
-      const mid = pts[Math.floor(pts.length / 2)];
-      const std = cableStandard(c.standard);
-      const lbl = e('text', { class: 'nd-cable-label', x: mid.x, y: mid.y - 5, 'text-anchor': 'middle' });
-      lbl.textContent = `${std.name} · ${c.length} m · ${speedLabel(c.speed)}${c.label ? ' · ' + c.label : ''}`;
-      g.appendChild(lbl);
-      g.querySelector('.nd-cable-hit').addEventListener('click', (ev) => { ev.stopPropagation(); cableMenu(c); });
-      gCables.appendChild(g);
-    });
-  }
-
-  function cableMenu(c) {
-    const std = cableStandard(c.standard);
-    UI.modal({
-      title: 'Verbindung',
-      body: (n) => {
-        n.appendChild(UI.el('p.text-sm.mb-2', { html: `<b>${std.name}</b> · ${c.length} m · ${speedLabel(c.speed)}${c.label ? ' · ' + UI.escapeHtml(c.label) : ''}` }));
-        n.appendChild(UI.el('p.text-sm.text-slate-500', { text: State.cableReason(c) }));
-      },
-      actions: [{ label: 'Kabel entfernen', danger: true, onClick: () => State.removeCable(c.id) }, { label: 'Schließen' }],
-    });
   }
 
   /* ------------------------------------------- Geräte-Interaktion */
   function enableDeviceInteract(g, d) {
     g.addEventListener('mousedown', (ev) => {
-      if (ev.button !== 0) return;
-      if (ev.target.closest('.nd-port')) return;
+      if (ev.button !== 0 || ev.target.closest('.nd-port')) return;
       ev.preventDefault(); ev.stopPropagation();
-      const startW = toWorld(ev.clientX, ev.clientY);
-      const orig = { x: d.x, y: d.y }; let moved = false;
-      hideCtxMenu();
-      const move = (e2) => {
-        const w = toWorld(e2.clientX, e2.clientY);
-        const nx = snap(orig.x + (w.x - startW.x)), ny = snap(orig.y + (w.y - startW.y));
-        if (nx !== d.x || ny !== d.y) moved = true;
-        State.moveDevice(d.id, nx, ny); renderCables(); renderDevices();
-      };
+      if (tool === 'group') { clickItem(d.id, true); return; }
+      const startW = toWorld(ev.clientX, ev.clientY); const orig = { x: d.x, y: d.y }; let moved = false; hideCtxMenu();
+      const move = (e2) => { const w = toWorld(e2.clientX, e2.clientY); const nx = snap(orig.x + (w.x - startW.x)), ny = snap(orig.y + (w.y - startW.y)); if (nx !== d.x || ny !== d.y) moved = true; State.moveDevice(d.id, nx, ny); renderCables(); renderDevices(); };
       const up = () => {
         document.removeEventListener('mousemove', move); document.removeEventListener('mouseup', up);
-        select(d.id);
-        if (!moved) showCtxMenu(d);   // Linksklick ohne Ziehen -> Quick Actions
+        if (moved) return;
+        clickItem(d.id, ev.shiftKey);
+        if (!ev.shiftKey && selectedIds.size === 1) showCtxMenu(d);
       };
       document.addEventListener('mousemove', move); document.addEventListener('mouseup', up);
     });
   }
 
+  /* ------------------------------------------------- Auswahl */
+  function clickItem(id, additive) {
+    if (additive) { selectedIds.has(id) ? selectedIds.delete(id) : selectedIds.add(id); }
+    else { selectedIds = new Set([id]); }
+    emitSel();
+  }
+  function setSelection(ids) { selectedIds = new Set(ids); emitSel(); hideCtxMenu(); }
+  function emitSel() { renderCables(); renderDevices(); Bus.emit('selection', [...selectedIds]); }
+  function deleteSelected() {
+    [...selectedIds].forEach((id) => { State.device(id) ? State.removeDevice(id) : State.removeCable(id); });
+    setSelection([]);
+  }
+
   /* ------------------------------------------------- Kontextmenü */
   function showCtxMenu(d) {
-    const W = boxWidth(d), cx = d.x + W / 2, cy = d.y + BOX_H / 2;
-    const halfY = ((d.rotation || 0) % 180 === 0) ? BOX_H / 2 : W / 2;
-    const top = worldToClient(cx, cy - halfY);
-    ctxMenu.innerHTML = '';
-    const mk = (icon, title, fn) => {
-      const b = document.createElement('button'); b.className = 'nd-ctx-btn'; b.title = title; b.textContent = icon;
-      b.addEventListener('click', (ev) => { ev.stopPropagation(); fn(); });
-      return b;
-    };
+    const W = boxWidth(d), cx = d.x + W / 2, cy = d.y + BOX_H / 2, halfY = ((d.rotation || 0) % 180 === 0) ? BOX_H / 2 : W / 2;
+    const top = worldToClient(cx, cy - halfY); ctxMenu.innerHTML = '';
+    const mk = (icon, title, fn) => { const b = document.createElement('button'); b.className = 'nd-ctx-btn'; b.title = title; b.innerHTML = icon; b.addEventListener('click', (ev) => { ev.stopPropagation(); fn(); }); return b; };
     ctxMenu.append(
-      mk('🗑️', 'Löschen', () => { State.removeDevice(d.id); hideCtxMenu(); select(null); }),
-      mk('⧉', 'Duplizieren', () => { const nd = State.duplicateDevice(d.id); hideCtxMenu(); if (nd) select(nd.id); }),
-      mk('⟳', 'Rotieren 90°', () => { State.rotateDevice(d.id); showCtxMenu(d); }),
-      mk('🎨', 'Farbe ändern', () => colorPalette(d)),
+      mk(Icons.get('trash'), 'Löschen', () => { State.removeDevice(d.id); hideCtxMenu(); setSelection([]); }),
+      mk(Icons.get('duplicate'), 'Duplizieren', () => { const nd = State.duplicateDevice(d.id); hideCtxMenu(); if (nd) setSelection([nd.id]); }),
+      mk(Icons.get('rotate'), 'Rotieren 90°', () => { State.rotateDevice(d.id); showCtxMenu(d); }),
+      mk(Icons.get('palette'), 'Farbe', () => colorPalette(d)),
     );
     const rect = wrap.getBoundingClientRect();
-    ctxMenu.style.left = (top.x - rect.left) + 'px';
-    ctxMenu.style.top = (top.y - rect.top - 44) + 'px';
+    ctxMenu.style.left = (top.x - rect.left) + 'px'; ctxMenu.style.top = (top.y - rect.top - 46) + 'px';
     ctxMenu.classList.remove('hidden');
   }
   function colorPalette(d) {
     ctxMenu.innerHTML = '';
     NETWORK_COLORS.concat([{ name: 'Keine', hex: null }]).forEach((c) => {
-      const b = document.createElement('button');
-      b.className = 'nd-ctx-swatch'; b.title = c.name;
-      b.style.background = c.hex || 'transparent';
-      if (!c.hex) b.textContent = '∅';
+      const b = document.createElement('button'); b.className = 'nd-ctx-swatch'; b.title = c.name; b.style.background = c.hex || 'transparent'; if (!c.hex) b.textContent = '∅';
       b.addEventListener('click', (ev) => { ev.stopPropagation(); State.setDeviceColor(d.id, c.hex); hideCtxMenu(); });
       ctxMenu.appendChild(b);
     });
   }
   function hideCtxMenu() { if (ctxMenu) ctxMenu.classList.add('hidden'); }
-  function worldToClient(x, y) { const m = svg.getScreenCTM(); return { x: m.a * x + m.c * y + m.e, y: m.b * x + m.d * y + m.f }; }
 
   /* --------------------------------------------- Verkabelungs-Flow */
-  function onPortClick(deviceId, portId) {
+  function onPortClick(deviceId, portId, shift) {
+    if (tool === 'group') { clickItem(deviceId, true); return; }
     const used = State.isPortUsed(deviceId, portId);
     if (!wiring) {
       if (used) { UI.toast('Port ist bereits belegt.', 'warn'); return; }
-      wiring = { deviceId, portId }; svg.classList.add('is-wiring');
-      UI.toast('Ziel-Port anklicken … (aktives Kabel: ' + cableStandard(State.activeCable.standard).name + ')', 'info');
+      wiring = { deviceId, portId, waypoints: [] }; svg.classList.add('is-wiring');
+      UI.toast('Route legen: leere Fläche klicken = Zwischenstop · Ziel-Port klicken = fertig · Esc = abbrechen', 'info');
       renderDevices(); return;
     }
     if (wiring.deviceId === deviceId && wiring.portId === portId) { cancelWiring(); return; }
     if (used) { UI.toast('Ziel-Port ist bereits belegt.', 'warn'); return; }
-    State.addCable({ deviceId: wiring.deviceId, portId: wiring.portId }, { deviceId, portId });
+    State.addCable({ deviceId: wiring.deviceId, portId: wiring.portId }, { deviceId, portId }, wiring.waypoints);
     cancelWiring();
   }
 
-  function onWireMove(ev) {
-    if (!wiring) return;
-    const A = portWorld(wiring.deviceId, wiring.portId); if (!A) return;
-    const w = toWorld(ev.clientX, ev.clientY);
-    // Auf nahen freien Port snappen.
-    snapTarget = nearestPort(w.x, w.y);
-    const end = snapTarget
-      ? { x: portWorld(snapTarget.deviceId, snapTarget.portId).x, y: portWorld(snapTarget.deviceId, snapTarget.portId).y, nx: 0, ny: 0 }
-      : { x: snap(w.x), y: snap(w.y), nx: 0, ny: 0 };
-    const pts = orthRoute(A, end);
+  function wiringBase() {
+    const A = portWorld(wiring.deviceId, wiring.portId);
+    const stubA = { x: snap(A.x + A.nx * STUB), y: snap(A.y + A.ny * STUB) };
+    return { A, pts: [{ x: A.x, y: A.y }, stubA, ...wiring.waypoints] };
+  }
+  function addWaypointAt(clientX, clientY) {
+    const w = toWorld(clientX, clientY); const { pts } = wiringBase();
+    const last = pts[pts.length - 1];
+    const np = align({ x: snap(w.x), y: snap(w.y) }, last);
+    if (np.x === last.x && np.y === last.y) return;
+    wiring.waypoints.push(np); onWireMoveXY(clientX, clientY);
+  }
+  function onWireMove(ev) { if (wiring) onWireMoveXY(ev.clientX, ev.clientY); }
+  function onWireMoveXY(clientX, clientY) {
+    const w = toWorld(clientX, clientY); const { pts } = wiringBase(); const last = pts[pts.length - 1];
+    const snapT = nearestPort(w.x, w.y);
+    let end;
+    if (snapT) { const pw = portWorld(snapT.deviceId, snapT.portId); const stub = { x: snap(pw.x + pw.nx * STUB), y: snap(pw.y + pw.ny * STUB) }; end = [align(stub, last), stub, { x: pw.x, y: pw.y }]; }
+    else { end = [align({ x: snap(w.x), y: snap(w.y) }, last)]; }
+    const full = orthogonalize([...pts, ...end]);
     if (!ghost) { ghost = e('path', { class: 'nd-wire-ghost' }); gOverlay.appendChild(ghost); }
-    ghost.setAttribute('d', pointsToPath(pts));
+    ghost.setAttribute('d', pointsToPath(full));
   }
   function nearestPort(x, y) {
-    let best = null, bd = 18 * 18;
-    State.project.devices.forEach((d) => {
-      d.ports.forEach((p) => {
-        if (d.id === wiring.deviceId && p.id === wiring.portId) return;
-        if (State.isPortUsed(d.id, p.id) || State.isPortDisabled(d.id, p.id)) return;
-        const w = portWorld(d.id, p.id); const dd = (w.x - x) ** 2 + (w.y - y) ** 2;
-        if (dd < bd) { bd = dd; best = { deviceId: d.id, portId: p.id }; }
-      });
-    });
+    let best = null, bd = 20 * 20;
+    State.project.devices.forEach((d) => d.ports.forEach((p) => {
+      if (d.id === wiring.deviceId && p.id === wiring.portId) return;
+      if (State.isPortUsed(d.id, p.id) || State.isPortDisabled(d.id, p.id)) return;
+      const w = portWorld(d.id, p.id), dd = (w.x - x) ** 2 + (w.y - y) ** 2;
+      if (dd < bd) { bd = dd; best = { deviceId: d.id, portId: p.id }; }
+    }));
     return best;
   }
-  function cancelWiring() { wiring = null; snapTarget = null; svg.classList.remove('is-wiring'); if (ghost) { ghost.remove(); ghost = null; } renderDevices(); }
+  function cancelWiring() { wiring = null; svg.classList.remove('is-wiring'); if (ghost) { ghost.remove(); ghost = null; } renderDevices(); }
 
-  /* --------------------------------------------------- Auswahl / Export */
-  function select(id) { selectedId = id; Bus.emit('select', id); renderDevices(); }
-  function deleteSelected() { if (selectedId) { State.removeDevice(selectedId); select(null); hideCtxMenu(); } }
-  function flashDevice(id) {
-    select(id);
-    const d = State.device(id); if (!d) return;
-    const W = boxWidth(d), cx = d.x + W / 2, cy = d.y + BOX_H / 2;
-    // Zentrieren
-    view.x = cx - view.w / 2; view.y = cy - view.h / 2; applyView();
-    const g = gDevices.querySelector(`[data-id="${id}"]`);
-    if (g) { g.classList.add('jump-flash'); setTimeout(() => g.classList.remove('jump-flash'), 1200); }
+  /* ------------------------------------------------------- Werkzeuge */
+  function setTool(t) {
+    tool = t; if (t !== 'wire' && wiring) cancelWiring();
+    svg.style.cursor = t === 'wire' ? 'crosshair' : 'grab';
+    Bus.emit('tool', t);
   }
 
+  /* --------------------------------------------------- Highlight */
+  function setHighlight(groupId) { highlightGroupId = (highlightGroupId === groupId) ? null : groupId; render(); Bus.emit('highlight', highlightGroupId); }
+
+  /* --------------------------------------------------------- Fit */
+  function fitView() {
+    const devs = State.project.devices; if (!devs.length) return;
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    devs.forEach((d) => { const W = boxWidth(d); minX = Math.min(minX, d.x); minY = Math.min(minY, d.y - 20); maxX = Math.max(maxX, d.x + W); maxY = Math.max(maxY, d.y + BOX_H + 20); });
+    const pad = 60, bw = maxX - minX + pad * 2, bh = maxY - minY + pad * 2;
+    const W = wrap.clientWidth || 1200, H = wrap.clientHeight || 800;
+    cam.zoom = Math.min(4, Math.max(0.2, Math.min(W / bw, H / bh)));
+    cam.x = minX - pad - (W / cam.zoom - bw) / 2; cam.y = minY - pad - (H / cam.zoom - bh) / 2;
+    applyView();
+  }
+
+  function flashDevice(id) {
+    setSelection([id]);
+    const d = State.device(id); if (!d) return;
+    const W = boxWidth(d), cx = d.x + W / 2, cy = d.y + BOX_H / 2;
+    cam.x = cx - (wrap.clientWidth / cam.zoom) / 2; cam.y = cy - (wrap.clientHeight / cam.zoom) / 2; applyView();
+    const g = gDevices.querySelector(`[data-id="${id}"]`); if (g) { g.classList.add('jump-flash'); setTimeout(() => g.classList.remove('jump-flash'), 1200); }
+  }
+
+  /* ------------------------------------------------- Export-SVG */
   function buildStandaloneSVG(mode) {
-    const devs = State.project.devices;
-    if (!devs.length) return { svg: '', width: 0, height: 0 };
+    const devs = State.project.devices; if (!devs.length) return { svg: '', width: 0, height: 0 };
     let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
     devs.forEach((d) => { const W = boxWidth(d); minX = Math.min(minX, d.x - 20); minY = Math.min(minY, d.y - 30); maxX = Math.max(maxX, d.x + W + 20); maxY = Math.max(maxY, d.y + BOX_H + 40); });
     const pad = 30; minX -= pad; minY -= pad; maxX += pad; maxY += pad;
     const Wd = Math.round(maxX - minX), Hd = Math.round(maxY - minY);
     const esc = (s) => String(s).replace(/[&<>]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]));
     const out = [`<rect x="${minX}" y="${minY}" width="${Wd}" height="${Hd}" fill="${mode === 'professional' ? '#fff' : '#f8fafc'}"/>`];
-
-    State.project.cables.forEach((c) => {
-      const A = portWorld(c.from.deviceId, c.from.portId), B = portWorld(c.to.deviceId, c.to.portId);
-      if (!A || !B) return;
-      const d = pointsToPath(orthRoute(A, B));
-      out.push(`<path d="${d}" fill="none" stroke="${c.status === 'error' ? '#ef4444' : c.color}" stroke-width="3" stroke-linejoin="round"/>`);
-    });
+    State.project.cables.forEach((c) => { const pts = cableRoute(c); if (!pts) return; out.push(`<path d="${pointsToPath(pts)}" fill="none" stroke="${c.status === 'error' ? '#ef4444' : c.color}" stroke-width="3" stroke-linejoin="round"/>`); });
     const symColor = mode === 'professional' ? '#334155' : '#000';
     devs.forEach((d) => {
-      const W = boxWidth(d), cx = d.x + W / 2, cy = d.y + BOX_H / 2, r = d.rotation || 0;
-      const halfY = (r % 180 === 0) ? BOX_H / 2 : W / 2;
+      const W = boxWidth(d), cx = d.x + W / 2, cy = d.y + BOX_H / 2, r = d.rotation || 0, halfY = (r % 180 === 0) ? BOX_H / 2 : W / 2;
       out.push(`<text x="${cx}" y="${cy - halfY - 8}" text-anchor="middle" font-family="sans-serif" font-weight="600" font-size="12" fill="#334155">${esc(d.props.hostname || d.model)}</text>`);
       out.push(`<g transform="translate(${cx} ${cy}) rotate(${r})">`);
       out.push(`<rect x="${-W / 2}" y="${-BOX_H / 2}" width="${W}" height="${BOX_H}" rx="8" fill="#fff" stroke="${d.color || '#94a3b8'}" stroke-width="${d.color ? 2.5 : 1.5}"/>`);
       out.push(`<g transform="translate(0 -8)" color="${symColor}" fill="${mode === 'professional' ? 'none' : symColor}">${Symbols.render(d.icon, mode)}</g>`);
-      d.ports.forEach((p, i) => {
-        const loc = portLocal(d, i); const st = portStatus(d.id, p.id); const on = st === 'ok' || st === 'warning';
+      d.ports.forEach((p, i) => { const loc = portLocal(d, i), st = portStatus(d.id, p.id), on = st === 'ok' || st === 'warning';
         out.push(`<rect x="${loc.x - PS / 2}" y="${loc.y - PS / 2}" width="${PS}" height="${PS}" rx="2" fill="#cbd5e1" stroke="#64748b"/>`);
-        out.push(`<rect x="${loc.x - PS / 2 + 1.5}" y="${loc.y - PS / 2 + 1.5}" width="3" height="3" fill="#16a34a" opacity="${on ? 1 : 0.2}"/>`);
-        out.push(`<rect x="${loc.x + PS / 2 - 4.5}" y="${loc.y - PS / 2 + 1.5}" width="3" height="3" fill="#f59e0b" opacity="${on ? 1 : 0.2}"/>`);
+        out.push(`<rect x="${loc.x - PS / 2 + 1.5}" y="${loc.y - PS / 2 + 1.5}" width="3" height="3" fill="#16a34a" opacity="${on ? 1 : .2}"/>`);
+        out.push(`<rect x="${loc.x + PS / 2 - 4.5}" y="${loc.y - PS / 2 + 1.5}" width="3" height="3" fill="#f59e0b" opacity="${on ? 1 : .2}"/>`);
         out.push(`<circle cx="${loc.x}" cy="${loc.y}" r="2.2" fill="#eab308"/>`);
         if (st === 'warning') out.push(`<g transform="translate(${loc.x + PS / 2} ${loc.y - PS / 2})"><circle r="4.5" fill="#dc2626"/><text y="3" text-anchor="middle" font-family="sans-serif" font-weight="700" font-size="8" fill="#fff">!</text></g>`);
       });
-      out.push(`</g>`);
+      out.push('</g>');
     });
     return { svg: `<svg xmlns="http://www.w3.org/2000/svg" width="${Wd}" height="${Hd}" viewBox="${minX} ${minY} ${Wd} ${Hd}">${out.join('')}</svg>`, width: Wd, height: Hd };
   }
 
-  return { init, render, select, deleteSelected, flashDevice, buildStandaloneSVG, get selectedId() { return selectedId; } };
+  return {
+    init, render, setTool, get tool() { return tool; }, setHighlight, get highlightGroupId() { return highlightGroupId; },
+    fitView, flashDevice, deleteSelected, buildStandaloneSVG, setSelection,
+    get selectedId() { return selectedIds.size === 1 ? [...selectedIds][0] : null; },
+    get selectedIds() { return [...selectedIds]; },
+  };
 })();

@@ -13,7 +13,7 @@ const LiveCode = (() => {
   function mount(container) {
     host = container;
     Bus.on('state', render);
-    Bus.on('select', highlight);
+    Bus.on('selection', (ids) => highlight(ids && ids[0]));
     render();
   }
 

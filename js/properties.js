@@ -13,20 +13,84 @@ const Properties = (() => {
 
   function mount(container) {
     host = container;
-    Bus.on('select', (id) => render(id));
-    Bus.on('state', () => { if (Canvas.selectedId) render(Canvas.selectedId); });
-    render(null);
+    Bus.on('selection', (ids) => onSelection(ids));
+    Bus.on('state', () => onSelection(Canvas.selectedIds));
+    onSelection([]);
   }
 
-  function render(id) {
+  // Dispatch je nach Auswahl: leer / 1 Gerät / 1 Kabel / mehrere.
+  function onSelection(ids) {
     host.innerHTML = '';
-    const dev = id ? State.device(id) : null;
-    if (!dev) {
-      host.appendChild(el('div.p-4.text-sm.text-slate-400', {
-        text: 'Kein Gerät ausgewählt. Ziehe ein Asset auf das Canvas oder klicke ein Gerät an.',
-      }));
+    ids = ids || [];
+    if (ids.length === 0) {
+      host.appendChild(el('div.p-4.text-sm.text-slate-400', { text: 'Nichts ausgewählt. Asset auf das Canvas ziehen, oder Gerät/Kabel anklicken. Shift-Klick für Mehrfachauswahl.' }));
       return;
     }
+    if (ids.length === 1) {
+      const dev = State.device(ids[0]);
+      if (dev) return renderDevice(dev);
+      const cbl = State.cable(ids[0]);
+      if (cbl) return renderCable(cbl);
+    }
+    renderMulti(ids);
+  }
+
+  function renderMulti(ids) {
+    const devs = ids.filter((id) => State.device(id)).length, cbls = ids.length - devs;
+    host.appendChild(el('div.p-4.space-y-3', {}, [
+      el('div.font-semibold', { text: `${ids.length} Elemente ausgewählt` }),
+      el('div.text-sm.text-slate-500', { text: `${devs} Gerät(e), ${cbls} Kabel` }),
+      el('button.w-full.px-3.py-2.rounded-lg.bg-indigo-600.text-white.text-sm.font-medium', { text: '＋ Gruppe aus Auswahl', onclick: () => { const g = State.createGroup(ids, null, null); UI.toast('Gruppe „' + g.name + '" erstellt.', 'ok'); } }),
+      el('button.w-full.px-3.py-2.rounded-lg.bg-red-100.text-red-700.dark\\:bg-red-900\\/40.dark\\:text-red-300.text-sm', { text: 'Auswahl löschen', onclick: () => Canvas.deleteSelected() }),
+    ]));
+  }
+
+  // -------------------------------------------------------- Kabel-Details
+  function renderCable(c) {
+    const std = cableStandard(c.standard);
+    host.appendChild(el('div.px-4.py-3.border-b.border-slate-200.dark\\:border-slate-700', {}, [
+      el('div.text-xs.uppercase.tracking-wide.text-slate-400', { text: 'Verbindung' }),
+      el('div.font-semibold', { text: `${std.name} · ${speedLabel(c.speed)}` }),
+    ]));
+    const body = el('div.p-4.space-y-3');
+    const a = State.device(c.from.deviceId), b = State.device(c.to.deviceId);
+    body.appendChild(el('div.text-sm', { html: `${UI.escapeHtml(a?.props.hostname || a?.model || '?')} → ${UI.escapeHtml(b?.props.hostname || b?.model || '?')}` }));
+    const reason = State.cableReason(c);
+    body.appendChild(el('div.text-xs.px-2.py-1.rounded', { class: c.status === 'ok' ? 'bg-emerald-100 dark:bg-emerald-900/30 text-emerald-700' : c.status === 'warning' ? 'bg-amber-100 dark:bg-amber-900/30 text-amber-700' : 'bg-red-100 dark:bg-red-900/30 text-red-700', text: reason }));
+
+    body.appendChild(selectField('Standard', CABLE_STANDARDS.map((s) => [s.id, s.name]), c.standard, (v) => State.updateCable(c.id, { standard: v })));
+    body.appendChild(numField('Länge (m)', c.length, (v) => State.updateCable(c.id, { length: v })));
+    body.appendChild(textFieldRaw('Flag / Bezeichnung', c.label, (v) => State.updateCable(c.id, { label: v })));
+    const colWrap = el('div'); colWrap.appendChild(el('label.block.text-xs.font-medium.mb-1', { text: 'Farbe' }));
+    const cr = el('div.flex.flex-wrap.gap-2');
+    NETWORK_COLORS.forEach((col) => cr.appendChild(el('button', { class: 'w-6 h-6 rounded-full border-2', style: `background:${col.hex};border-color:${c.color === col.hex ? '#6366f1' : 'transparent'}`, title: col.name, onclick: () => State.updateCable(c.id, { color: col.hex }) })));
+    colWrap.appendChild(cr); body.appendChild(colWrap);
+    if (c.waypoints && c.waypoints.length) body.appendChild(el('button.text-xs.text-indigo-600', { text: `Zwischenstops zurücksetzen (${c.waypoints.length})`, onclick: () => State.updateCable(c.id, { waypoints: [] }) }));
+    host.appendChild(body);
+    host.appendChild(el('div.px-4.py-3.border-t.border-slate-200.dark\\:border-slate-700', {}, [
+      el('button.w-full.px-3.py-2.rounded-lg.bg-red-100.text-red-700.dark\\:bg-red-900\\/40.dark\\:text-red-300.text-sm.font-medium', { text: 'Kabel löschen', onclick: () => { State.removeCable(c.id); Canvas.setSelection([]); } }),
+    ]));
+  }
+
+  function selectField(label, opts, value, onChange) {
+    const w = el('div'); w.appendChild(el('label.block.text-xs.font-medium.mb-1', { text: label }));
+    const sel = el('select.w-full.rounded-lg.border.border-slate-300.dark\\:border-slate-600.bg-transparent.px-3.py-2.text-sm', { onchange: (e) => onChange(e.target.value) });
+    opts.forEach(([v, l]) => { const o = el('option', { value: v, text: l }); if (v === value) o.selected = true; sel.appendChild(o); });
+    w.appendChild(sel); return w;
+  }
+  function numField(label, value, onChange) {
+    const w = el('div'); w.appendChild(el('label.block.text-xs.font-medium.mb-1', { text: label }));
+    w.appendChild(el('input', { type: 'number', step: '0.01', min: '0', value, class: 'w-full rounded-lg border border-slate-300 dark:border-slate-600 bg-transparent px-3 py-2 text-sm', onchange: (e) => onChange(parseFloat(e.target.value) || 0) }));
+    return w;
+  }
+  function textFieldRaw(label, value, onChange) {
+    const w = el('div'); w.appendChild(el('label.block.text-xs.font-medium.mb-1', { text: label }));
+    w.appendChild(el('input', { value: value || '', class: 'w-full rounded-lg border border-slate-300 dark:border-slate-600 bg-transparent px-3 py-2 text-sm', onchange: (e) => onChange(e.target.value) }));
+    return w;
+  }
+
+  // -------------------------------------------------------- Geräte-Details
+  function renderDevice(dev) {
 
     host.appendChild(el('div.px-4.py-3.border-b.border-slate-200.dark\\:border-slate-700', {}, [
       el('div.text-xs.uppercase.tracking-wide.text-slate-400', { text: dev.category || 'Gerät' }),
@@ -97,7 +161,7 @@ const Properties = (() => {
 
     if (!sensitiveUnlocked && !(dev.props.ssid || dev.props.password)) {
       wrap.appendChild(el('button.text-xs.px-3.py-1.5.rounded.bg-amber-500.text-white', {
-        text: 'Freischalten …', onclick: () => confirmSensitive(() => render(dev.id)),
+        text: 'Freischalten …', onclick: () => confirmSensitive(() => renderDevice(State.device(dev.id))),
       }));
       return wrap;
     }

@@ -106,6 +106,46 @@
 
 .nd-device.jump-flash .nd-device-body { stroke: #6366f1; stroke-width: 3; filter: drop-shadow(0 0 6px rgba(99,102,241,.8)); }
 
+/* ------------------------------------------------------ Werkzeug-Toolbar */
+.nd-toolbar {
+  height: 72px; flex-shrink: 0; display: flex; align-items: stretch; gap: 6px;
+  padding: 6px 12px; overflow-x: auto; overflow-y: hidden;
+  background: #ffffff; border-bottom: 1px solid #e2e8f0;
+  box-shadow: 0 1px 3px rgba(15,23,42,.06);
+}
+.dark .nd-toolbar { background: #0f172a; border-color: #1e293b; }
+.nd-toolbar::-webkit-scrollbar { height: 6px; }
+.nd-toolbar::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 4px; }
+
+.nd-tsep { width: 1px; background: #e2e8f0; margin: 4px 2px; flex-shrink: 0; }
+.dark .nd-tsep { background: #1e293b; }
+
+.nd-tgroup { display: flex; flex-direction: column; justify-content: space-between; flex-shrink: 0; }
+.nd-tgroup-body { display: flex; align-items: stretch; gap: 3px; }
+.nd-tgroup-label { text-align: center; font-size: 9px; text-transform: uppercase; letter-spacing: .05em; color: #94a3b8; margin-top: 3px; user-select: none; }
+
+.nd-tbtn {
+  display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 3px;
+  min-width: 54px; padding: 4px 8px; border-radius: 8px; color: #475569;
+  background: transparent; transition: background .12s, color .12s; cursor: pointer;
+}
+.nd-tbtn span { font-size: 10px; line-height: 1; font-weight: 500; white-space: nowrap; }
+.dark .nd-tbtn { color: #cbd5e1; }
+.nd-tbtn:hover { background: #f1f5f9; color: #0f172a; }
+.dark .nd-tbtn:hover { background: #1e293b; color: #f8fafc; }
+.nd-tbtn.active { background: #eef2ff; color: #4f46e5; box-shadow: inset 0 0 0 1.5px #c7d2fe; }
+.dark .nd-tbtn.active { background: #312e81; color: #c7d2fe; box-shadow: inset 0 0 0 1.5px #4338ca; }
+.nd-tbtn-wide { flex-direction: row; min-width: 0; gap: 6px; padding: 0 12px; border: 1px solid #e2e8f0; }
+.dark .nd-tbtn-wide { border-color: #334155; }
+.nd-tbtn-wide span { font-size: 11px; }
+
+/* ---------------------------------------------- Highlight / Dim / Auswahl */
+.nd-dim { opacity: .14; transition: opacity .15s; pointer-events: none; }
+/*.nd-device.nd-hl { }*/
+.nd-cable-halo { fill: none; stroke-width: 9; stroke-linecap: round; stroke-linejoin: round; opacity: .35; }
+.nd-cable-g.selected .nd-cable { filter: drop-shadow(0 0 3px #6366f1); stroke-width: 4; }
+.nd-cable-g.selected .nd-cable-label { fill: #4f46e5; font-weight: 700; }
+
 /* --------------------------------------------------------- Accordion (Palette) */
 .nd-acc-head { display: flex; align-items: center; justify-content: space-between; width: 100%; padding: 6px 8px; font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: .03em; color: #64748b; cursor: pointer; }
 .nd-acc-head:hover { color: #334155; }
