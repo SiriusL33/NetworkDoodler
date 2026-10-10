@@ -1,0 +1,40 @@
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Network Schematic Designer</title>
+
+<!--
+  Network Schematic Designer (v3.0)
+  Lokaler, JSON-state-basierter Netzwerk-Schaltplan-Editor im Stil von PCB-Design-Software.
+  Architektur: Vanilla JS, HTML5, Tailwind (Play-CDN). Keine Backend-Abhängigkeiten.
+  Das UI spiegelt ausschliesslich den zentralen JSON-State (js/state.js) wider.
+-->
+
+<script src="https://cdn.tailwindcss.com"></script>
+<script>
+  // Tailwind Dark-Mode ueber die .dark-Klasse am <html>-Element steuern.
+  // Abgesichert: Falls das CDN (z. B. offline) nicht laedt, wirft der
+  // Editor keinen Fehler – nur das Utility-Styling fehlt dann.
+  if (window.tailwind) tailwind.config = { darkMode: 'class' };
+</script>
+<link rel="stylesheet" href="css/styles.css" />
+
+<div id="app" class="h-screen w-screen overflow-hidden bg-slate-100 text-slate-800 dark:bg-slate-900 dark:text-slate-100">
+  <!-- Views werden von js/app.js in #app gerendert. -->
+</div>
+
+<!-- SVG-Symbol-Sprite fuer Geraete-Piktogramme (Design & Professional Mode) -->
+<div id="symbol-sprite" hidden></div>
+
+<!-- Reihenfolge beachten: Daten -> State -> Feature-Module -> Bootstrap -->
+<script src="js/data.js"></script>
+<script src="js/state.js"></script>
+<script src="js/ui.js"></script>
+<script src="js/icons.js"></script>
+<script src="js/symbols.js"></script>
+<script src="js/database.js"></script>
+<script src="js/properties.js"></script>
+<script src="js/groups.js"></script>
+<script src="js/livecode.js"></script>
+<script src="js/canvas.js"></script>
+<script src="js/exporter.js"></script>
+<script src="js/app.js"></script>
